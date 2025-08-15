@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Jarvis 2.0 — Hinglish + Voice + Weather</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{
+      --bg:#0b1220;--card:#121a2b;--muted:#6e7b8f;--accent:#4f8cff;--text:#e9eef7;
+      --me:#1e2a44;--bot:#0f1a2e;--ok:#11cfa8;--warn:#ff9f4a;--err:#ff5d7a
+    }
+    *{box-sizing:border-box} body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:#0b1220;color:var(--text);min-height:100vh;display:grid;grid-template-rows:auto 1fr auto}
+    header{position:sticky;top:0;z-index:3;background:linear-gradient(180deg,#0b1220,#0b122000 80%);padding:12px}
+    .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--card);border-radius:12px;padding:8px 10px}
+    .bar input[type="password"], .bar input[type="text"], .bar select{background:#0a1324;border:1px solid #223352;color:var(--text);border-radius:8px;padding:8px}
+    .bar label{font-size:12px;color:var(--muted)}
+    .grow{flex:1}
+    .btn{background:var(--accent);color:#fff;border:0;padding:8px 12px;border-radius:10px;font-weight:600;cursor:pointer}
+    .btn.secondary{background:#24365a}
+    .pill{font-size:12px;color:var(--muted)}
+    main{display:grid;grid-template-rows:1fr auto;gap:10px;padding:12px}
+    #chat{background:var(--card);border-radius:14px;padding:12px;overflow:auto;min-height:50vh}
+    .msg{display:grid;gap:6px;margin:10px 0}
+    .bubble{padding:12px 14px;border-radius:12px;line-height:1.45;white-space:pre-wrap}
+    .me .bubble{background:var(--me)}
+    .bot .bubble{background:var(--bot);border:1px solid #1c2a44}
+    .tool{border-left:3px solid var(--ok);padding-left:10px;margin-top:4px;opacity:.95}
+    .weather{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px}
+    .kv{background:#0a1324;border:1px solid #223352;border-radius:10px;padding:8px;text-align:center}
+    form{display:grid;grid-template-columns:auto 1fr auto auto;gap:8px;align-items:end}
+    textarea{width:100%;min-height:56px;max-height:160px;resize:vertical;background:#0a1324;color:var(--text);border:1px solid #223352;border-radius:12px;padding:12px}
+    footer{color:var(--muted);font-size:12px;text-align:center;padding:10px}
+    .status{font-size:12px;color:var(--muted)}
+    .pulse{width:8px;height:8px;background:var(--accent);border-radius:50%;box-shadow:0 0 0 0 rgba(79,140,255,.6);animation:ping 1.2s infinite}
+    @keyframes ping{0%{box-shadow:0 0 0 0 rgba(79,140,255,.6)}70%{box-shadow:0 0 0 10px rgba(79,140,255,0)}100%{box-shadow:0 0 0 0 rgba(79,140,255,0)}}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="bar">
+      <strong>Jarvis 2.0</strong>
+      <span class="pill">· Hinglish + Voice + Weather</span>
+      <span class="grow"></span>
+      <label>Groq API Key</label>
+      <input id="apiKey" type="password" placeholder="gsk_..." size="24" />
+      <button id="saveKey" class="btn secondary">Save</button>
+      <label>STT language</label>
+      <select id="sttLocale">
+        <option value="hi-IN">Hindi (India)</option>
+        <option value="en-IN" selected>English (India)</option>
+      </select>
+      <span id="state" class="status">idle</span>
+      <div id="dot" class="pulse" style="display:none" title="working"></div>
+    </div>
+  </header>
+
+  <main>
+    <div id="chat" aria-live="polite"></div>
+
+    <form id="composer">
+      <button id="micBtn" type="button" class="btn secondary">🎤 Speak</button>
+      <textarea id="input" placeholder="Bol ke ya type karke poocho… e.g. 'aaj Mumbai ka weather?'"></textarea>
+      <button id="speakToggle" type="button" class="btn secondary">🔊 Voice: Off</button>
+      <button id="send" type="submit" class="btn">Send</button>
+    </form>
+  </main>
+
+  <footer>
+    Uses Groq (LLaMA‑3) for chat + Open‑Meteo for weather. Your key is stored only in your browser (localStorage).
+  </footer>
+
+  <script>
+    /***************
+     * CONFIG
+     ***************/
+    const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
+    const DEFAULT_MODEL = "llama3-8b-8192"; // fast, good enough for Hinglish
+
+    // Try to prefill from local storage
+    const apiKeyInput = document.getElementById('apiKey');
+    apiKeyInput.value = localStorage.getItem('groq_api_key') || "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";
+
+    const saveKeyBtn = document.getElementById('saveKey');
+    saveKeyBtn.addEventListener('click', () => {
+      localStorage.setItem('groq_api_key', apiKeyInput.value.trim());
+      toast("API key saved (locally).");
+    });
+
+    /***************
+     * UI helpers
+     ***************/
+    const chatEl = document.getElementById('chat');
+    const form = document.getElementById('composer');
+    const input = document.getElementById('input');
+    const sttLocaleSel = document.getElementById('sttLocale');
+    const speakToggleBtn = document.getElementById('speakToggle');
+    const micBtn = document.getElementById('micBtn');
+    const stateEl = document.getElementById('state');
+    const dotEl = document.getElementById('dot');
+
+    let speakEnabled = false;
+    let rec = null; // speech recognition
+    let voices = [];
+
+    function addMessage(role, html) {
+      const item = document.createElement('div');
+      item.className = `msg ${role === 'user' ? 'me' : 'bot'}`;
+      item.innerHTML = `<div class="bubble">${html}</div>`;
+      chatEl.appendChild(item);
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    function escapeHtml(s){return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+
+    function setBusy(b){
+      stateEl.textContent = b ? 'thinking…' : 'idle';
+      dotEl.style.display = b ? 'inline-block' : 'none';
+    }
+
+    function toast(msg){
+      stateEl.textContent = msg;
+      setTimeout(()=> stateEl.textContent = 'idle', 2000);
+    }
+
+    /***************
+     * Speech — TTS
+     ***************/
+    function pickVoice() {
+      voices = speechSynthesis.getVoices();
+      // Prefer Indian voices if available
+      const prefer = voices.find(v => /hi-IN|India/i.test(v.lang) || /India/i.test(v.name));
+      return prefer || voices.find(v => /en-IN/i.test(v.lang)) || voices.find(v => /en/i.test(v.lang)) || voices[0];
+    }
+
+    function speak(text){
+      if(!speakEnabled) return;
+      if(!('speechSynthesis' in window)) return toast('TTS not supported in this browser');
+      const v = pickVoice();
+      const u = new SpeechSynthesisUtterance(text);
+      if (v) u.voice = v;
+      u.rate = 1.0; u.pitch = 1.0;
+      speechSynthesis.cancel();
+      speechSynthesis.speak(u);
+    }
+
+    speakToggleBtn.addEventListener('click', () => {
+      speakEnabled = !speakEnabled;
+      speakToggleBtn.textContent = speakEnabled ? '🔊 Voice: On' : '🔊 Voice: Off';
+      if (speakEnabled) toast('Voice enabled');
+      else toast('Voice disabled');
+    });
+
+    /***************
+     * Speech — STT
+     ***************/
+    function setupSTT(){
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if(!SR){ micBtn.disabled = true; micBtn.textContent = '🎤 Not supported'; return; }
+      rec = new SR();
+      rec.continuous = false;
+      rec.interimResults = true;
+      rec.lang = sttLocaleSel.value;
+      rec.onresult = (e)=>{
+        let t = '';
+        for (let i=0; i<e.results.length; i++) t += e.results[i][0].transcript;
+        input.value = t;
+      };
+      rec.onend = ()=> { micBtn.textContent = '🎤 Speak'; };
+      rec.onerror = ()=> { micBtn.textContent = '🎤 Speak'; };
+    }
+    setupSTT();
+    sttLocaleSel.addEventListener('change', ()=>{
+      if(rec) rec.lang = sttLocaleSel.value;
+      toast('STT language set.');
+    });
+
+    micBtn.addEventListener('click', ()=>{
+      if(!rec){ return; }
+      if(speechSynthesis.speaking) speechSynthesis.cancel();
+      try { rec.start(); micBtn.textContent = '🛑 Stop'; } catch {}
+    });
+
+    /***************
+     * Weather tool (Open‑Meteo)
+     ***************/
+    async function geocodeCity(name){
+      const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=1`;
+      const r = await fetch(url);
+      if(!r.ok) throw new Error('geocoding failed');
+      const j = await r.json();
+      if(!j.results || !j.results.length) throw new Error('city not found');
+      const c = j.results[0];
+      return { lat:c.latitude, lon:c.longitude, name:`${c.name}${c.admin1?`, ${c.admin1}`:''}, country:c.country_code };
+    }
+
+    async function getWeatherByCoords(lat, lon){
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m&hourly=temperature_2m&timezone=auto`;
+      const r = await fetch(url);
+      if(!r.ok) throw new Error('weather failed');
+      return await r.json();
+    }
+
+    function wmoToText(code){
+      // Tiny mapping for common codes
+      const map = {
+        0:'Clear',1:'Mainly clear',2:'Partly cloudy',3:'Cloudy',
+        45:'Fog',48:'Fog',51:'Light drizzle',53:'Drizzle',55:'Heavy drizzle',
+        61:'Light rain',63:'Rain',65:'Heavy rain',66:'Freezing rain',67:'Freezing rain',
+        71:'Light snow',73:'Snow',75:'Heavy snow',80:'Rain showers',81:'Showers',82:'Heavy showers',
+        95:'Thunderstorm'
+      };
+      return map[code] || '—';
+    }
+
+    function renderWeatherCard(place, cur){
+      const html = `
+        <div class="tool">
+          <strong>🌤️ Weather — ${escapeHtml(place)}</strong>
+          <div class="weather">
+            <div class="kv"><div style="font-size:12px;color:var(--muted)">Temp</div><div style="font-size:24px">${Math.round(cur.temperature_2m)}°C</div></div>
+            <div class="kv"><div style="font-size:12px;color:var(--muted)">Feels</div><div style="font-size:24px">${Math.round(cur.apparent_temperature)}°C</div></div>
+            <div class="kv"><div style="font-size:12px;color:var(--muted)">Humidity</div><div style="font-size:18px">${cur.relative_humidity_2m}%</div></div>
+            <div class="kv"><div style="font-size:12px;color:var(--muted)">Wind</div><div style="font-size:18px">${Math.round(cur.wind_speed_10m)} km/h</div></div>
+            <div class="kv"><div style="font-size:12px;color:var(--muted)">Conditions</div><div style="font-size:16px">${wmoToText(cur.weather_code)}</div></div>
+            <div class="kv"><div style="font-size:12px;color:var(--muted)">Precip</div><div style="font-size:18px">${cur.precipitation ?? 0} mm</div></div>
+          </div>
+        </div>`;
+      return html;
+    }
+
+    // Simple intent detection for weather
+    function wantsWeather(text){
+      return /(weather|temp(erature)?|barish|rain|mausam|forecast)/i.test(text);
+    }
+    function extractCityGuess(text){
+      // naive "in <city>" or "at <city>" or ending word
+      const m = text.match(/\b(?:in|at|for)\s+([A-Za-z][A-Za-z\s\-']{2,})$/i);
+      return m ? m[1].trim() : null;
+    }
+
+    async function tryWeatherFlow(userText){
+      try{
+        let placeName = extractCityGuess(userText);
+        let lat, lon, label = '';
+
+        if(placeName){
+          const g = await geocodeCity(placeName);
+          lat = g.lat; lon = g.lon; label = `${g.name}, ${g.country}`;
+        }else if(navigator.geolocation){
+          const pos = await new Promise((resolve,reject)=>navigator.geolocation.getCurrentPosition(resolve,reject,{enableHighAccuracy:true,timeout:8000}));
+          lat = pos.coords.latitude; lon = pos.coords.longitude; label = 'your location';
+        }else{
+          addMessage('assistant', '⚠️ Location not provided. Type e.g. “weather in Delhi”.');
+          return null;
+        }
+
+        const wx = await getWeatherByCoords(lat, lon);
+        const cur = wx.current;
+        const card = renderWeatherCard(label, cur);
+        addMessage('assistant', card);
+        // Also return a tiny natural-language summary
+        return `Mausam update (${label}): ${Math.round(cur.temperature_2m)}°C, ${wmoToText(cur.weather_code)}. Feels like ${Math.round(cur.apparent_temperature)}°C, humidity ${cur.relative_humidity_2m}%.`;
+      }catch(e){
+        addMessage('assistant', '⚠️ Weather fetch failed. Try “weather in <city>”.');
+        return null;
+      }
+    }
+
+    /***************
+     * Chat (Groq)
+     ***************/
+    const history = [
+      { role:'system', content:
+        "You are Jarvis, an upbeat assistant for an Indian user. \
+Understand and respond in Hinglish (mix Hindi + English) based on how the user speaks. \
+Keep replies short and helpful. If user asks for weather, keep it crisp. \
+Format short lists with hyphens. Avoid markdown headings."
+      }
+    ];
+
+    async function askGroq(prompt){
+      const key = (apiKeyInput.value || '').trim();
+      if(!key || key === 'YOUR_GROQ_API_KEY_HERE'){ throw new Error('Missing Groq API key'); }
+      const body = {
+        model: DEFAULT_MODEL,
+        messages: [...history, { role:'user', content: prompt }],
+        temperature: 0.6
+      };
+      const r = await fetch(GROQ_ENDPOINT, {
+        method:'POST',
+        headers:{
+          'Content-Type':'application/json',
+          'Authorization':'Bearer ' + key
+        },
+        body: JSON.stringify(body)
+      });
+      const j = await r.json();
+      if(!r.ok){ throw new Error(j.error?.message || 'Groq error'); }
+      return j.choices?.[0]?.message?.content?.trim() || '(no reply)';
+    }
+
+    /***************
+     * Orchestrator
+     ***************/
+    form.addEventListener('submit', async (e)=>{
+      e.preventDefault();
+      const q = input.value.trim();
+      if(!q) return;
+
+      // UI add user msg
+      addMessage('user', escapeHtml(q));
+      history.push({ role:'user', content:q });
+      input.value = '';
+      setBusy(true);
+
+      try{
+        // TOOL: Weather first if asked
+        if (wantsWeather(q)) {
+          const brief = await tryWeatherFlow(q);
+          if (brief) {
+            // Ask LLM to add a friendly one-liner in Hinglish using the brief
+            const tip = await askGroq(`User asked for weather. Here is a brief summary: "${brief}". Respond with one friendly sentence in Hinglish (max ~20 words), maybe 1 tip.`);
+            addMessage('assistant', escapeHtml(tip));
+            speak(tip);
+            history.push({ role:'assistant', content: tip });
+            setBusy(false);
+            return;
+          }
+          // fall through to normal chat if weather failed
+        }
+
+        // Normal LLM chat
+        const reply = await askGroq(q);
+        addMessage('assistant', escapeHtml(reply));
+        history.push({ role:'assistant', content: reply });
+        speak(reply);
+      }catch(err){
+        console.error(err);
+        addMessage('assistant', '⚠️ ' + (err.message || 'Kuch gadbad ho gayi.'));
+      }finally{
+        setBusy(false);
+        input.focus();
+      }
+    });
+
+    // Warm hello
+    addMessage('assistant', "Namaste! Main Jarvis hoon. Hinglish samajhta hoon. Weather chahiye toh bolo: “weather in Delhi” ya mic se bolo. 🙂");
+
+    // Prepare TTS voices list once available
+    if ('speechSynthesis' in window) {
+      speechSynthesis.onvoiceschanged = () => { voices = speechSynthesis.getVoices(); };
+      voices = speechSynthesis.getVoices();
+    }
+  </script>
+</body>
+</html>
