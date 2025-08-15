@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Jarvis with Login</title>
+<style>
+    body {
+        background: black;
+        color: cyan;
+        font-family: monospace;
+        padding: 20px;
+    }
+    input, button, textarea {
+        padding: 10px;
+        border: 2px solid cyan;
+        background: black;
+        color: cyan;
+        font-size: 1rem;
+        width: 100%;
+        margin: 5px 0;
+    }
+    #jarvisUI { display: none; }
+    pre {
+        background: rgba(0,255,255,0.1);
+        padding: 10px;
+        white-space: pre-wrap;
+    }
+</style>
+</head>
+<body>
+
+<div id="loginScreen">
+    <h1>Enter Groq API Key</h1>
+    <input type="password" id="apiKey" placeholder="Groq API Key">
+    <button onclick="unlockJarvis()">Unlock</button>
+    <p id="status"></p>
+</div>
+
+<div id="jarvisUI">
+    <h1>Jarvis</h1>
+    <textarea id="userInput" placeholder="Ask Jarvis something..."></textarea>
+    <button onclick="sendToJarvis()">Send</button>
+    <pre id="jarvisOutput"></pre>
+</div>
+
+<script>
+let GROQ_API_KEY = null;
+
+function unlockJarvis() {
+    const key = document.getElementById("apiKey").value.trim();
+    if (!key) {
+        document.getElementById("status").textContent = "❌ API Key Required";
+        return;
+    }
+    GROQ_API_KEY = key;
+    document.getElementById("loginScreen").style.display = "none";
+    document.getElementById("jarvisUI").style.display = "block";
+}
+
+async function sendToJarvis() {
+    const prompt = document.getElementById("userInput").value.trim();
+    const outputEl = document.getElementById("jarvisOutput");
+    if (!prompt) return;
+    outputEl.textContent = "Thinking...";
+
+    try {
+        const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Authorization": Bearer ${GROQ_API_KEY},
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                model: "llama3-8b-8192",
+                messages: [{ role: "user", content: prompt }]
+            })
+        });
+
+        const data = await res.json();
+        if (data.error) {
+            outputEl.textContent = "❌ API Error: " + JSON.stringify(data.error);
+        } else {
+            outputEl.textContent = data.choices[0].message.content;
+        }
+    } catch (err) {
+        outputEl.textContent = "❌ Request Failed: " + err.message;
+    }
+}
+</script>
+
+</body>
+</html>
